@@ -688,16 +688,7 @@ func shouldSkipClaudeMessageDeltaUsagePatch(info *relaycommon.RelayInfo) bool {
 }
 
 func clientVisibleModelName(info *relaycommon.RelayInfo) string {
-	if info == nil {
-		return ""
-	}
-	if (info.IsModelMapped || (info.ChannelMeta != nil && info.ChannelMeta.IsModelMapped)) && info.OriginModelName != "" {
-		return info.OriginModelName
-	}
-	if info.ChannelMeta != nil && info.ChannelMeta.UpstreamModelName != "" {
-		return info.ChannelMeta.UpstreamModelName
-	}
-	return info.OriginModelName
+	return info.ClientVisibleModelName("")
 }
 
 func normalizeClaudeResponseModelForClient(response *dto.ClaudeResponse, info *relaycommon.RelayInfo) {

@@ -241,6 +241,25 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	}
 }
 
+func (info *RelayInfo) ClientVisibleModelName(fallback string) string {
+	if info == nil {
+		return fallback
+	}
+	if (info.IsModelMapped || (info.ChannelMeta != nil && info.ChannelMeta.IsModelMapped)) && info.OriginModelName != "" {
+		return info.OriginModelName
+	}
+	if fallback != "" {
+		return fallback
+	}
+	if info.ChannelMeta != nil && info.ChannelMeta.UpstreamModelName != "" {
+		return info.ChannelMeta.UpstreamModelName
+	}
+	if info.UpstreamModelName != "" {
+		return info.UpstreamModelName
+	}
+	return info.OriginModelName
+}
+
 func (info *RelayInfo) ToString() string {
 	if info == nil {
 		return "RelayInfo<nil>"

@@ -7,6 +7,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRelayInfoClientVisibleModelNameUsesOriginForMappedModel(t *testing.T) {
+	info := &RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+
+	model := info.ClientVisibleModelName("gpt-5.5-free")
+
+	require.Equal(t, "gpt-5.5", model)
+	require.Equal(t, "gpt-5.5", info.OriginModelName)
+	require.Equal(t, "gpt-5.5-free", info.ChannelMeta.UpstreamModelName)
+}
+
+func TestRelayInfoClientVisibleModelNameUsesFallbackForUnmappedModel(t *testing.T) {
+	info := &RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &ChannelMeta{
+			UpstreamModelName: "gpt-5.5",
+			IsModelMapped:     false,
+		},
+	}
+
+	require.Equal(t, "upstream-response-model", info.ClientVisibleModelName("upstream-response-model"))
+}
+
+func TestRelayInfoClientVisibleModelNameFallbacksWhenResponseModelMissing(t *testing.T) {
+	info := &RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+		},
+	}
+
+	require.Equal(t, "gpt-5.5-free", info.ClientVisibleModelName(""))
+}
+
+func TestRelayInfoClientVisibleModelNameNilReceiver(t *testing.T) {
+	var info *RelayInfo
+	require.Equal(t, "fallback-model", info.ClientVisibleModelName("fallback-model"))
+}
+
 func TestRelayInfoGetFinalRequestRelayFormatPrefersExplicitFinal(t *testing.T) {
 	info := &RelayInfo{
 		RelayFormat:             types.RelayFormatOpenAI,

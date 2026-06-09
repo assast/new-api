@@ -10,4 +10,5 @@
 ### Fixed
 
 - Preserve client-visible model names for mapped Claude relay responses while keeping upstream model names for internal usage accounting.
+- Preserve client-visible model names when converting OpenAI-compatible responses to Claude format.
 - Patch Claude streaming `message_delta` usage fields when upstream providers omit prompt/cache usage details.
