@@ -1,11 +1,14 @@
 package claude
 
 import (
+	"net/http/httptest"
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/types"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -126,4 +129,173 @@ func TestBuildMessageDeltaPatchUsage(t *testing.T) {
 		require.EqualValues(t, 50, usage.CacheCreation.Ephemeral5mInputTokens)
 		require.EqualValues(t, 0, usage.CacheCreation.Ephemeral1hInputTokens)
 	})
+}
+
+func TestClientVisibleModelNameUsesOriginForMappedModels(t *testing.T) {
+	t.Run("mapped model uses origin from relay info", func(t *testing.T) {
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-5.5",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gpt-5.5-free",
+				IsModelMapped:     true,
+			},
+		}
+
+		require.Equal(t, "gpt-5.5", clientVisibleModelName(info))
+	})
+
+	t.Run("mapped model uses origin from channel meta", func(t *testing.T) {
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-5.5",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gpt-5.5-free",
+				IsModelMapped:     true,
+			},
+		}
+
+		require.Equal(t, "gpt-5.5", clientVisibleModelName(info))
+	})
+
+	t.Run("unmapped model keeps upstream", func(t *testing.T) {
+		info := &relaycommon.RelayInfo{
+			OriginModelName: "gpt-5.5",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "gpt-5.5",
+				IsModelMapped:     false,
+			},
+		}
+
+		require.Equal(t, "gpt-5.5", clientVisibleModelName(info))
+	})
+}
+
+func TestNormalizeClaudeResponseModelForClient(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	response := &dto.ClaudeResponse{
+		Type:  "message",
+		Model: "gpt-5.5-free",
+	}
+
+	normalizeClaudeResponseModelForClient(response, info)
+
+	require.Equal(t, "gpt-5.5", response.Model)
+}
+
+func TestPatchClaudeStreamModelForClient(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	data := `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"gpt-5.5-free"}}`
+
+	patchedData := patchClaudeStreamModelForClient(data, info)
+
+	require.Equal(t, "gpt-5.5", gjson.Get(patchedData, "message.model").String())
+}
+
+func TestPatchClaudeStreamModelForClientDoesNotCreateMissingMessage(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	data := `{"type":"message_start","vendor_meta":{"trace_id":"trace_001"}}`
+
+	patchedData := patchClaudeStreamModelForClient(data, info)
+
+	require.Equal(t, data, patchedData)
+	assert.False(t, gjson.Get(patchedData, "message").Exists())
+}
+
+func TestPatchClaudeResponseModelForClientPreservesUnknownFields(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	data := []byte(`{"type":"message","model":"gpt-5.5-free","vendor_meta":{"trace_id":"trace_001"}}`)
+
+	patchedData := patchClaudeResponseModelForClient(data, info)
+
+	require.Equal(t, "gpt-5.5", gjson.GetBytes(patchedData, "model").String())
+	require.Equal(t, "trace_001", gjson.GetBytes(patchedData, "vendor_meta.trace_id").String())
+}
+
+func TestOpenAIResponseModelUsesOriginForMappedClaude(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	response := &dto.OpenAITextResponse{Model: "gpt-5.5-free"}
+
+	normalizeOpenAIResponseModelForClient(response, info)
+
+	require.Equal(t, "gpt-5.5", response.Model)
+}
+
+func TestOpenAIStreamResponseModelUsesOriginForMappedClaude(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+	}
+	response := &dto.ChatCompletionsStreamResponse{Model: "gpt-5.5-free"}
+
+	normalizeOpenAIStreamResponseModelForClient(response, info)
+
+	require.Equal(t, "gpt-5.5", response.Model)
+}
+
+func TestFinalUsageModelUsesOriginForMappedClaudeOpenAIStream(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+		ShouldIncludeUsage: true,
+		RelayFormat:        types.RelayFormatOpenAI,
+	}
+
+	require.Equal(t, "gpt-5.5", finalUsageModelNameForClient(info))
+}
+
+func TestHandleStreamResponseDataKeepsInternalUpstreamModelAndPatchesClientModel(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		OriginModelName: "gpt-5.5",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-5.5-free",
+			IsModelMapped:     true,
+		},
+		RelayFormat: types.RelayFormatClaude,
+	}
+	claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{}}
+	data := `{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"gpt-5.5-free","usage":{"input_tokens":1,"output_tokens":1}}}`
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+
+	err := HandleStreamResponseData(c, info, claudeInfo, data)
+
+	require.Nil(t, err)
+	require.Equal(t, "gpt-5.5-free", info.UpstreamModelName)
+	require.Equal(t, "gpt-5.5-free", info.ChannelMeta.UpstreamModelName)
+	require.Equal(t, "gpt-5.5-free", claudeInfo.Model)
 }

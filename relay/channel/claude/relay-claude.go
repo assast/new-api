@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -380,6 +381,14 @@ func RequestOpenAI2ClaudeMessage(c *gin.Context, textRequest dto.GeneralOpenAIRe
 								Text: common.GetPointer[string](mediaMessage.Text),
 							})
 						}
+					case dto.ContentTypeFile:
+						claudeMediaMessage, err := claudeMediaMessageFromOpenAIFile(c, mediaMessage)
+						if err != nil {
+							return nil, err
+						}
+						if claudeMediaMessage != nil {
+							claudeMediaMessages = append(claudeMediaMessages, *claudeMediaMessage)
+						}
 					default:
 						source := mediaMessage.ToFileSource()
 						if source == nil {
@@ -678,6 +687,92 @@ func shouldSkipClaudeMessageDeltaUsagePatch(info *relaycommon.RelayInfo) bool {
 	return info.ChannelSetting.PassThroughBodyEnabled
 }
 
+func clientVisibleModelName(info *relaycommon.RelayInfo) string {
+	if info == nil {
+		return ""
+	}
+	if (info.IsModelMapped || (info.ChannelMeta != nil && info.ChannelMeta.IsModelMapped)) && info.OriginModelName != "" {
+		return info.OriginModelName
+	}
+	if info.ChannelMeta != nil && info.ChannelMeta.UpstreamModelName != "" {
+		return info.ChannelMeta.UpstreamModelName
+	}
+	return info.OriginModelName
+}
+
+func normalizeClaudeResponseModelForClient(response *dto.ClaudeResponse, info *relaycommon.RelayInfo) {
+	if response == nil {
+		return
+	}
+	visibleModel := clientVisibleModelName(info)
+	if visibleModel == "" {
+		return
+	}
+	if response.Model != "" {
+		response.Model = visibleModel
+	}
+	if response.Message != nil && response.Message.Model != "" {
+		response.Message.Model = visibleModel
+	}
+}
+
+func patchClaudeResponseModelForClient(data []byte, info *relaycommon.RelayInfo) []byte {
+	visibleModel := clientVisibleModelName(info)
+	if visibleModel == "" || len(data) == 0 {
+		return data
+	}
+	patchedData := string(data)
+	if gjson.GetBytes(data, "model").String() != "" {
+		var err error
+		patchedData, err = sjson.Set(patchedData, "model", visibleModel)
+		if err != nil {
+			return data
+		}
+	}
+	if gjson.GetBytes(data, "message.model").String() != "" {
+		var err error
+		patchedData, err = sjson.Set(patchedData, "message.model", visibleModel)
+		if err != nil {
+			return data
+		}
+	}
+	return []byte(patchedData)
+}
+
+func patchClaudeStreamModelForClient(data string, info *relaycommon.RelayInfo) string {
+	visibleModel := clientVisibleModelName(info)
+	if visibleModel == "" || data == "" || gjson.Get(data, "message.model").String() == "" {
+		return data
+	}
+	patchedData, err := sjson.Set(data, "message.model", visibleModel)
+	if err != nil {
+		return data
+	}
+	return patchedData
+}
+
+func normalizeOpenAIResponseModelForClient(response *dto.OpenAITextResponse, info *relaycommon.RelayInfo) {
+	if response == nil {
+		return
+	}
+	if visibleModel := clientVisibleModelName(info); visibleModel != "" {
+		response.Model = visibleModel
+	}
+}
+
+func normalizeOpenAIStreamResponseModelForClient(response *dto.ChatCompletionsStreamResponse, info *relaycommon.RelayInfo) {
+	if response == nil {
+		return
+	}
+	if visibleModel := clientVisibleModelName(info); visibleModel != "" {
+		response.Model = visibleModel
+	}
+}
+
+func finalUsageModelNameForClient(info *relaycommon.RelayInfo) string {
+	return clientVisibleModelName(info)
+}
+
 func patchClaudeMessageDeltaUsageData(data string, usage *dto.ClaudeUsage) string {
 	if data == "" || usage == nil {
 		return data
@@ -808,6 +903,8 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			if claudeResponse.Message != nil {
 				info.UpstreamModelName = claudeResponse.Message.Model
 			}
+			normalizeClaudeResponseModelForClient(&claudeResponse, info)
+			data = patchClaudeStreamModelForClient(data, info)
 		} else if claudeResponse.Type == "message_delta" {
 			// 确保 message_delta 的 usage 包含完整的 input_tokens 和 cache 相关字段
 			// 解决 AWS Bedrock 等上游返回的 message_delta 缺少这些字段的问题
@@ -822,6 +919,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		if !FormatClaudeResponseInfo(&claudeResponse, response, claudeInfo) {
 			return nil
 		}
+		normalizeOpenAIStreamResponseModelForClient(response, info)
 
 		err = helper.ObjectData(c, response)
 		if err != nil {
@@ -859,7 +957,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		if info.ShouldIncludeUsage {
 			openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
-			response := helper.GenerateFinalUsageResponse(claudeInfo.ResponseId, claudeInfo.Created, info.UpstreamModelName, openAIUsage)
+			response := helper.GenerateFinalUsageResponse(claudeInfo.ResponseId, claudeInfo.Created, finalUsageModelNameForClient(info), openAIUsage)
 			err := helper.ObjectData(c, response)
 			if err != nil {
 				common.SysLog("send final response failed: " + err.Error())
@@ -919,13 +1017,14 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
 		openaiResponse := ResponseClaude2OpenAI(&claudeResponse)
+		normalizeOpenAIResponseModelForClient(openaiResponse, info)
 		openaiResponse.Usage = buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)
 		responseData, err = json.Marshal(openaiResponse)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 	case types.RelayFormatClaude:
-		responseData = data
+		responseData = patchClaudeResponseModelForClient(data, info)
 	}
 
 	if claudeResponse.Usage != nil && claudeResponse.Usage.ServerToolUse != nil && claudeResponse.Usage.ServerToolUse.WebSearchRequests > 0 {
@@ -956,6 +1055,59 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 		return nil, handleErr
 	}
 	return claudeInfo.Usage, nil
+}
+
+func claudeMediaMessageFromOpenAIFile(c *gin.Context, mediaMessage dto.MediaContent) (*dto.ClaudeMediaMessage, error) {
+	file := mediaMessage.GetFile()
+	if file == nil || file.FileData == "" {
+		return nil, nil
+	}
+	fileName := strings.ToLower(file.FileName)
+	if strings.HasSuffix(fileName, ".txt") || strings.HasSuffix(fileName, ".md") || strings.HasSuffix(fileName, ".csv") || strings.HasSuffix(fileName, ".json") || strings.HasSuffix(fileName, ".yaml") || strings.HasSuffix(fileName, ".yml") || strings.HasSuffix(fileName, ".xml") {
+		source := mediaMessage.ToFileSource()
+		if source == nil {
+			return nil, nil
+		}
+		base64Data, _, err := service.GetBase64Data(c, source, "formatting text file for Claude")
+		if err != nil {
+			return nil, fmt.Errorf("get text file data failed: %s", err.Error())
+		}
+		decoded, err := base64.StdEncoding.DecodeString(base64Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode text file data failed: %w", err)
+		}
+		return &dto.ClaudeMediaMessage{
+			Type: "text",
+			Text: common.GetPointer(string(decoded)),
+		}, nil
+	}
+
+	if !strings.HasSuffix(fileName, ".pdf") {
+		return nil, nil
+	}
+
+	source := mediaMessage.ToFileSource()
+	if source == nil {
+		return nil, nil
+	}
+	base64Data, mimeType, err := service.GetBase64Data(c, source, "formatting file for Claude")
+	if err != nil {
+		return nil, fmt.Errorf("get file data failed: %s", err.Error())
+	}
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = "application/pdf"
+	}
+	if !strings.HasPrefix(mimeType, "application/pdf") {
+		return nil, nil
+	}
+	return &dto.ClaudeMediaMessage{
+		Type: "document",
+		Source: &dto.ClaudeMessageSource{
+			Type:      "base64",
+			MediaType: mimeType,
+			Data:      base64Data,
+		},
+	}, nil
 }
 
 func mapToolChoice(toolChoice any, parallelToolCalls *bool) *dto.ClaudeToolChoice {
